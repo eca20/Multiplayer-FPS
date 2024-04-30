@@ -1,18 +1,69 @@
+using Ajuna.NetApi;
+using Ajuna.NetApi.Model.Extrinsics;
+using Ajuna.NetApi.Model.Rpc;
+using Ajuna.NetApi.Model.Types;
+using Ajuna.NetApi.Model.Types.Base;
+using Ajuna.NetApi.Model.Types.Primitive;
+using Ajuna.NetWallet;
 using Photon.Pun;
+using System;
+using System.Collections;
+using System.Net.Http;
+using System.Numerics;
+using System.Threading;
+using System.Threading.Tasks;
+using Schnorrkel.Keys;
+using SubstrateNET.NetApi.Generated;
+using SubstrateNET.NetApi.Generated.Model.sp_core.crypto;
+using SubstrateNET.NetApi.Generated.Model.sp_runtime.multiaddress;
+using SubstrateNET.NetApi.Generated.Storage;
+using SubstrateNET.RestClient;
+using Random = System.Random;
+using StreamJsonRpc;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityStandardAssets.Characters.FirstPerson;
-using System.Collections;
+using TMPro;
+
 
 [RequireComponent(typeof(FirstPersonController))]
 [RequireComponent(typeof(Rigidbody))]
 
 public class PlayerHealth : MonoBehaviourPunCallbacks, IPunObservable {
 
+    public MiniSecret MiniSecretAlice => new MiniSecret(Utils.HexToByteArray("0xe5be9a5092b81bca64be81d212e7f2f9eba183bb7a90954f7b76361f6edb5c0a"), ExpandMode.Ed25519);
+    public Account Alice => Account.Build(KeyType.Sr25519, MiniSecretAlice.ExpandToSecret().ToBytes(), MiniSecretAlice.GetPair().Public.Key);
+    public MiniSecret MiniSecretBob => new MiniSecret(Utils.HexToByteArray("0x398f0c28f98885e046333d4a41c19cee4c37368a9832c6502f6cfd182e2aef89"), ExpandMode.Ed25519);
+    public Account Bob => Account.Build(KeyType.Sr25519, MiniSecretBob.ExpandToSecret().ToBytes(), MiniSecretAlice.GetPair().Public.Key);
+    public string NodeUrl = "ws://127.0.0.1:9944";
+    private SubstrateClientExt _client;
+
+    public SubstrateClientExt Client => _client;
+
+    private Random _random;
+
+    private HttpClient _httpClient;
+
+    private Client _serviceClient;
+
+    private string _mnemonicSeed;
+
+    private Hash _currentBlockHash, _finalBlockHash;
+
+    private BlockData _currentBlockData, _finalBlockData;
     public delegate void Respawn(float time);
     public delegate void AddMessage(string Message);
     public event Respawn RespawnEvent;
     public event AddMessage AddMessageEvent;
+    public bool IsPooling = false;
+
+    private Wallet _wallet;
+    public bool IsConnected => Client.IsConnected;
+    public Account Account => _wallet.Account;
+
+    public TextMeshProUGUI txtBlockNumber, txtPeers, txtName;
+
+    public TextMeshProUGUI txtWalletName, txtWalletAddress, txtWalletBalance, txtWalletState;
 
     [SerializeField]
     private int startingHealth = 100;
@@ -63,6 +114,15 @@ public class PlayerHealth : MonoBehaviourPunCallbacks, IPunObservable {
         damaged = false;
         isDead = false;
         isSinking = false;
+        _random = new Random();
+
+        _client = new SubstrateClientExt(new Uri(NodeUrl));
+
+        txtBlockNumber.text = "0<#557190>/0";
+        _currentBlockHash = null;
+        _currentBlockData = null;
+        _finalBlockHash = null;
+        _finalBlockData = null;
     }
 
     /// <summary>
@@ -76,7 +136,7 @@ public class PlayerHealth : MonoBehaviourPunCallbacks, IPunObservable {
             damageImage.color = Color.Lerp(damageImage.color, Color.clear, flashSpeed * Time.deltaTime);
         }
         if (isSinking) {
-            transform.Translate(Vector3.down * sinkSpeed * Time.deltaTime);
+            transform.Translate(UnityEngine.Vector3.down * sinkSpeed * Time.deltaTime);
         }
     }
 
@@ -117,6 +177,7 @@ public class PlayerHealth : MonoBehaviourPunCallbacks, IPunObservable {
             RespawnEvent(respawnTime);
             StartCoroutine("DestoryPlayer", respawnTime);
         }
+        TransferBalance(this.Alice, this.Bob, 1000);
         playerAudio.clip = deathClip;
         playerAudio.Play();
         StartCoroutine("StartSinking", sinkTime);
@@ -154,6 +215,103 @@ public class PlayerHealth : MonoBehaviourPunCallbacks, IPunObservable {
         } else {
             currentHealth = (int)stream.ReceiveNext();
         }
+    }
+
+     public async void TransferBalance(Account senderAccount,Account recipientAccount,  long amount)
+        {
+            if (!Client.IsConnected)
+            {
+                Debug.Log("Not connected!");
+            }
+
+            var transferRecipient = new AccountId32();
+            transferRecipient.Create(recipientAccount.Bytes);
+
+            var multiAddress = new EnumMultiAddress();
+            multiAddress.Create(MultiAddress.Id, transferRecipient);
+
+            var baseCampactU128 = new BaseCom<U128>();
+            baseCampactU128.Create(amount);
+
+            var transferKeepAlive = BalancesCalls.TransferKeepAlive(multiAddress, baseCampactU128);
+
+            try
+            {
+                await Client.Author.SubmitAndWatchExtrinsicAsync(
+                    OnExtrinsicStateUpdateEvent,
+                    transferKeepAlive,
+                    senderAccount, new ChargeAssetTxPayment(0, 0), 64, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                var errorMessage = "An error occured";
+
+                if (ex is RemoteInvocationException)
+                {
+                    errorMessage = ((RemoteInvocationException) ex).Message;
+                }
+
+                UnityMainThreadDispatcher.DispatchAsync(() =>
+                {
+                    txtWalletState.text = errorMessage;
+                    txtWalletState.color = Color.red;
+                    txtWalletState.fontSize = 40;
+                });
+            }
+
+        }
+
+         /// <summary>
+    /// Callback sent together with the extrinsic
+    /// </summary>
+    /// <param name="subscriptionId"></param>
+    /// <param name="extrinsicStatus"></param>
+    private void OnExtrinsicStateUpdateEvent(string subscriptionId, ExtrinsicStatus extrinsicStatus)
+    {
+        var state = "Unknown";
+
+        switch (extrinsicStatus.ExtrinsicState)
+        {
+            case ExtrinsicState.None:
+                if (extrinsicStatus.InBlock?.Value.Length > 0)
+                {
+                    state = "InBlock";
+                }
+                else if (extrinsicStatus.Finalized?.Value.Length > 0)
+                {
+                    state = "Finalized";
+                }
+                else
+                {
+                    state = "None";
+                }
+                break;
+
+            case ExtrinsicState.Future:
+                state = "Future";
+                break;
+
+            case ExtrinsicState.Ready:
+                state = "Ready";
+                break;
+
+            case ExtrinsicState.Dropped:
+                state = "Dropped";
+                break;
+
+            case ExtrinsicState.Invalid:
+                state = "Invalid";
+                break;
+        }
+
+        UnityMainThreadDispatcher.DispatchAsync(() =>
+        {
+            txtWalletState.text = state;
+            txtWalletState.color = Color.black;
+            txtWalletState.fontSize = 40;
+            Debug.Log("Font Size: " + txtWalletState.fontSize);
+      
+        });
     }
 
 }

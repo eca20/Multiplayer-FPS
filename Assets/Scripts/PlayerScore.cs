@@ -1,6 +1,7 @@
 ﻿using UnityEngine;
 
 // TODO: finish score system later, this script is not used now.
+// TODO : add killstreak scores
 public class PlayerScore : MonoBehaviour {
 
     private int score = 0;
