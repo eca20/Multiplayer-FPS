@@ -10,6 +10,7 @@ public class LobbyPanelOpener : MonoBehaviour
     public GameObject LobbyPanel;
     public GameObject HeartImage;
     public GameObject HealthSlider;
+    public GameObject WalletPanel;
 
     private static ILogger logger = Debug.unityLogger;
 
@@ -24,7 +25,7 @@ public class LobbyPanelOpener : MonoBehaviour
     {
         isActive = LobbyPanel.activeSelf;
 
-        if (Input.GetKeyDown(KeyCode.Escape))
+        if (Input.GetKeyDown(KeyCode.Backspace))
         {
            Debug.unityLogger.Log("Escape pressed!");
            Debug.unityLogger.Log("Lobby panel is:" + LobbyPanel.activeSelf);
@@ -32,6 +33,7 @@ public class LobbyPanelOpener : MonoBehaviour
            if(isActive)
            {
                 LobbyPanel.SetActive(false);
+                WalletPanel.SetActive(false);
                 HeartImage.SetActive(true);
                 HealthSlider.SetActive(true);
                 Cursor.visible = true;
@@ -40,6 +42,7 @@ public class LobbyPanelOpener : MonoBehaviour
            else
            {
                 LobbyPanel.SetActive(true);
+                WalletPanel.SetActive(true);
                 HeartImage.SetActive(false);
                 HealthSlider.SetActive(false);
                 Cursor.visible = true;
